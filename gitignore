@@ -1,0 +1,34 @@
+# Kubernetes credentials — never commit
+*.kubeconfig
+kubeconfig
+.kube/
+k3s.yaml
+**/k3s.yaml
+
+# Secret files
+*.secret.yaml
+*.secret.yml
+secrets/
+*-secret.yaml
+
+# SSH private keys (public keys .pub are safe to commit)
+*.pem
+*.key
+id_rsa
+id_rsa*
+id_ed25519
+id_ed25519*
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Terraform (if added later)
+*.tfstate
+*.tfstate.backup
+.terraform/
