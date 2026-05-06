@@ -1,6 +1,3 @@
-# k8s-homelab
-Serious, production-like lab environment for testing infrastructure, configurations, and troubleshooting scenarios. Built with a no-nonsense approach, no shortcuts, no guesswork, no bulto.
-
 # Serious Lab Only (No Bulto Allowed)
 
 ## Aquí no se viene a inventar… esto es serio, pana mio
