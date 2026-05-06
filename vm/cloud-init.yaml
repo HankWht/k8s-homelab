@@ -1,0 +1,234 @@
+#cloud-config
+# =============================================================================
+# vm/cloud-init.yaml
+#
+# Automated first-boot provisioning for the k8s-sre-lab VM.
+# Runs once on first boot. Installs k3s, Helm, and all lab tools.
+#
+# Required before deploying:
+#
+#   1. SSH public key — replace REPLACE_WITH_YOUR_PUBLIC_KEY
+#      cat ~/.ssh/id_ed25519.pub
+#
+#   2. Password hash  — replace REPLACE_WITH_HASHED_PASSWORD
+#      openssl passwd -6   (paste the full output starting with $6$)
+# =============================================================================
+
+hostname: k8s-lab
+fqdn: k8s-lab.local
+manage_etc_hosts: true
+
+users:
+  - name: labuser
+    gecos: Lab User
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    passwd: "REPLACE_WITH_HASHED_PASSWORD"
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI REPLACE_WITH_YOUR_PUBLIC_KEY user@host
+
+package_update: true
+package_upgrade: true
+
+packages:
+  # Core
+  - curl
+  - wget
+  - git
+  - vim
+  - tmux
+  - bash-completion
+  - jq          # JSON — essential for kubectl output and API responses
+  - unzip
+  - gnupg
+
+  # Network debugging
+  - net-tools
+  - iputils-ping
+  - dnsutils    # dig, nslookup
+  - nmap
+  - mtr-tiny
+  - tcpdump     # packet capture — non-negotiable for network debugging
+  - iperf3
+  - netcat-openbsd
+
+  # Kubernetes prerequisites
+  - socat       # required by k3s port-forwarding
+  - conntrack   # required by the kube-proxy network layer
+  - ipvsadm
+  - open-iscsi  # required by Longhorn (if added later)
+  - nfs-common
+  - ethtool
+
+  # SRE: resource investigation
+  - htop
+  - atop        # records historical data for post-incident replay
+  - iotop       # per-process disk I/O
+  - nethogs     # per-process network usage
+  - sysstat     # sar, iostat, mpstat — the SRE CLI toolkit
+  - dool        # real-time system stats (modern dstat replacement)
+  - lsof
+  - strace      # syscall tracing — essential for black-box debugging
+  - ltrace
+
+  # SRE: kernel tracing
+  - linux-tools-common  # perf
+  - bpfcc-tools         # execsnoop, tcptracer, opensnoop
+  - bpftrace
+
+  # SRE: load testing
+  - stress-ng   # generate CPU/memory/disk load to trigger alerts
+  - fio         # disk I/O benchmark
+  - apache2-utils  # ab — HTTP load testing
+
+  # Disk
+  - ncdu
+  - parted
+  - gdisk
+
+write_files:
+
+  - path: /etc/modules-load.d/k8s.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      overlay
+      br_netfilter
+
+  - path: /etc/sysctl.d/k8s.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      # Required for pod-to-pod traffic to pass through the bridge
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+
+      # Prometheus, Grafana, and kubelet each watch thousands of files —
+      # without this, they fail with "too many open files"
+      fs.inotify.max_user_watches   = 524288
+      fs.inotify.max_user_instances = 512
+      fs.file-max                   = 131072
+
+      # Needed when load-testing with hey/ab (many concurrent connections)
+      net.ipv4.ip_local_port_range = 1024 65535
+
+  # Ubuntu's .bashrc sources ~/.bash_aliases automatically
+  - path: /home/labuser/.bash_aliases
+    owner: labuser:labuser
+    permissions: "0644"
+    content: |
+      # Kubernetes
+      alias k='kubectl'
+      alias kga='kubectl get all -A'
+      alias kgp='kubectl get pods -A -o wide'
+      alias kgn='kubectl get nodes -o wide'
+      alias kgs='kubectl get svc -A'
+      alias kns='kubectl config set-context --current --namespace'
+      alias kdesc='kubectl describe'
+      alias klogs='kubectl logs --tail=100 -f'
+      alias kexec='kubectl exec -it'
+
+      # Cluster health
+      alias pod-restarts='kubectl get pods -A --sort-by=.status.containerStatuses[0].restartCount | tail -20'
+      alias pending-pods='kubectl get pods -A --field-selector=status.phase=Pending'
+      alias failed-pods='kubectl get pods -A --field-selector=status.phase=Failed'
+      alias events='kubectl get events -A --sort-by=.lastTimestamp | tail -30'
+
+      # System investigation
+      alias topcpu='ps aux --sort=-%cpu | head -20'
+      alias topmem='ps aux --sort=-%mem | head -20'
+      alias ports='ss -tulpn'
+      alias sockets='ss -tan | awk "NR>1{print \$1}" | sort | uniq -c | sort -rn'
+      alias diskfree='df -hT | grep -v tmpfs'
+      alias openfiles='lsof -i -n -P | head -40'
+
+      # Port-forward monitoring UIs (run from inside the VM)
+      alias prom-fwd='kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &'
+      alias grafana-fwd='kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80 &'
+      alias am-fwd='kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093 &'
+      alias loki-fwd='kubectl -n monitoring port-forward svc/loki 3100:3100 &'
+
+      # Helm
+      alias helmls='helm list -A'
+      alias helmup='helm repo update'
+
+      # k3s
+      alias k3s-status='sudo systemctl status k3s'
+      alias k3s-logs='sudo journalctl -u k3s -f --no-pager'
+
+runcmd:
+  # Kubernetes requires swap off
+  - swapoff -a
+  - sed -i '/\bswap\b/d' /etc/fstab
+
+  - modprobe overlay
+  - modprobe br_netfilter
+  - sysctl --system
+
+  # Disabled for lab simplicity
+  - ufw disable
+
+  - systemctl enable --now iscsid
+
+  # Enable sar background collection (run: sar -u 1 5)
+  - sed -i 's/^ENABLED="false"/ENABLED="true"/' /etc/default/sysstat
+  - systemctl enable --now sysstat
+
+  - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+  # yq: YAML processor
+  - wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+  - chmod +x /usr/local/bin/yq
+
+  # hey: HTTP load generator for Ingress testing
+  - wget -qO /usr/local/bin/hey https://hey-release.s3.us-east-2.amazonaws.com/hey_linux_amd64
+  - chmod +x /usr/local/bin/hey
+
+  # --disable=traefik    replaced by NGINX Ingress
+  # --disable=servicelb  replaced by MetalLB
+  # --cluster-init       embedded etcd instead of SQLite (HA-capable)
+  - bash -c 'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --disable=traefik --disable=servicelb --write-kubeconfig-mode=644 --cluster-init --node-name=k8s-lab" sh -'
+
+  - mkdir -p /home/labuser/.kube
+  - cp /etc/rancher/k3s/k3s.yaml /home/labuser/.kube/config
+  - chown -R labuser:labuser /home/labuser/.kube
+
+  - |
+    cat > /etc/rancher/k3s/registries.yaml << 'EOF'
+    mirrors:
+      "registry.lab:80":
+        endpoint:
+          - "http://registry.lab:80"
+    EOF
+
+  # Helm repos are per-user (~/.config/helm/). sudo -H sets HOME=/home/labuser
+  # so repos are stored where labuser can find them, not in /root/.config/helm/
+  - sudo -H -u labuser bash -c 'helm repo add prometheus-community https://prometheus-community.github.io/helm-charts'
+  - sudo -H -u labuser bash -c 'helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx'
+  - sudo -H -u labuser bash -c 'helm repo add metallb https://metallb.github.io/metallb'
+  - sudo -H -u labuser bash -c 'helm repo add grafana https://grafana.github.io/helm-charts'
+  - sudo -H -u labuser bash -c 'helm repo add twuni https://helm.twun.io'
+  - sudo -H -u labuser bash -c 'helm repo add longhorn https://charts.longhorn.io'
+  - sudo -H -u labuser bash -c 'helm repo add argo https://argoproj.github.io/argo-helm'
+  - sudo -H -u labuser bash -c 'helm repo update'
+
+  # nerdctl: Docker-compatible CLI backed by containerd (no Docker daemon needed)
+  - bash -c 'wget -qO /tmp/nerdctl.tar.gz https://github.com/containerd/nerdctl/releases/download/v1.7.6/nerdctl-1.7.6-linux-amd64.tar.gz && tar xf /tmp/nerdctl.tar.gz -C /usr/local/bin/ && rm /tmp/nerdctl.tar.gz'
+
+  - mkdir -p /opt/cni/bin
+  - bash -c 'wget -qO /tmp/cni.tgz https://github.com/containernetworking/plugins/releases/download/v1.4.1/cni-plugins-linux-amd64-v1.4.1.tgz && tar xf /tmp/cni.tgz -C /opt/cni/bin/ && rm /tmp/cni.tgz'
+
+final_message: |
+  ============================================================
+   k8s-sre-lab ready — provisioned in $UPTIME seconds
+   SSH: ssh labuser@<vm-ip>
+   Cluster: kubectl get nodes
+  ============================================================
+
+# Reboot so all sysctl/module/service changes take effect cleanly
+power_state:
+  mode: reboot
+  timeout: 30
+  condition: true
