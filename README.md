@@ -32,7 +32,7 @@ Build, break, fix, and learn the right way.
 ---
 
 **Status:** Active 
-**Mode:** No Bulto 
+**Mode:** Diablo 😈
 
 ---
 
